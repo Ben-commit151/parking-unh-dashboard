@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Parking UNH – Tableau de bord d'exploitation</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  :root { --bleu:#1f3a5f; --vert:#16a34a; --orange:#f59e0b; --rouge:#dc2626; --gris:#64748b; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f1f5f9; color: #0f172a; transition: background .3s; }
+  body.alarme { background: #fee2e2; }
+  header { background: var(--bleu); color: #fff; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  header h1 { margin: 0; font-size: 22px; }
+  .etat { padding: 4px 12px; border-radius: 999px; font-size: 13px; background: var(--gris); margin-left: 6px; }
+  .ok { background: var(--vert) !important; } .ko { background: var(--rouge) !important; } .warn { background: var(--orange) !important; }
+  main { max-width: 1250px; margin: 18px auto; padding: 0 16px; }
+  .banniere { display: none; padding: 14px; border-radius: 12px; color: #fff; font-weight: 700; font-size: 18px; text-align: center; margin-bottom: 14px; }
+  .banniere.visible { display: block; }
+  #banAlarme { background: var(--rouge); animation: clignote 1s infinite; }
+  #banComplet { background: var(--orange); }
+  @keyframes clignote { 50% { opacity: .55; } }
+  .grille { display: grid; gap: 14px; }
+  .g4 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+  .g2 { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); margin-top: 14px; }
+  .g3 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); margin-top: 14px; }
+  .carte { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px #0002; }
+  .carte h3 { margin: 0 0 10px; font-size: 15px; color: var(--bleu); }
+  .lbl { font-size: 13px; color: var(--gris); }
+  .gros { font-size: 34px; font-weight: 700; }
+  .jauge { height: 14px; background: #e2e8f0; border-radius: 999px; overflow: hidden; margin-top: 8px; }
+  .jauge div { height: 100%; width: 0; background: var(--vert); transition: width .4s, background .4s; }
+  .ligne { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
+  .ligne:last-child { border: 0; }
+  .pastille { padding: 2px 10px; border-radius: 999px; color: #fff; font-size: 12px; background: var(--gris); }
+  .acces { display: flex; gap: 14px; }
+  .acces > div { flex: 1; text-align: center; padding: 10px; border-radius: 10px; background: #f8fafc; }
+  .voiture { font-size: 34px; opacity: .2; transition: opacity .3s; }
+  .voiture.la { opacity: 1; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 6px; border-bottom: 1px solid #e2e8f0; text-align: left; }
+  th { color: var(--gris); font-weight: 600; }
+  .defile { max-height: 300px; overflow-y: auto; }
+  button { padding: 8px 12px; border: 0; border-radius: 8px; background: var(--bleu); color: #fff; cursor: pointer; margin: 3px; font-size: 13px; }
+  button.rouge { background: var(--rouge); } button.vert { background: var(--vert); } button.orange { background: var(--orange); }
+  input { width: 80px; padding: 6px; border: 1px solid #cbd5e1; border-radius: 6px; }
+  .reglage { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 13px; }
+  .reglage span { width: 120px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🅿️ Parking UNH – Exploitation</h1>
+  <div>Broker <span id="broker" class="etat">connexion...</span>
+       Parking <span id="status" class="etat">?</span>
+       Mode <span id="mode" class="etat">?</span></div>
+</header>
+
+<main>
+  <div id="banAlarme" class="banniere">🚨 ALARME</div>
+  <div id="banComplet" class="banniere">⛔ PARKING COMPLET</div>
+
+  <!-- Indicateurs principaux -->
+  <div class="grille g4">
+    <div class="carte"><div class="lbl">Véhicules présents</div><div class="gros"><span id="presents">--</span> / <span id="capacite">--</span></div></div>
+    <div class="carte"><div class="lbl">Places libres</div><div class="gros" id="libres">--</div></div>
+    <div class="carte"><div class="lbl">Taux d'occupation</div><div class="gros" id="taux">--</div>
+      <div class="jauge"><div id="jauge"></div></div></div>
+    <div class="carte"><div class="lbl">Recette du jour</div><div class="gros"><span id="recette">0</span> <small>CDF</small></div></div>
+  </div>
+
+  <div class="grille g3">
+    <!-- Accès -->
+    <div class="carte"><h3>Accès</h3>
+      <div class="acces">
+        <div><div class="lbl">Entrée</div><div id="vE" class="voiture">🚗</div>
+          <div id="dE" class="lbl">-- cm</div><span id="bE" class="pastille">?</span></div>
+        <div><div class="lbl">Sortie</div><div id="vS" class="voiture">🚗</div>
+          <div id="dS" class="lbl">-- cm</div><span id="bS" class="pastille">?</span></div>
+      </div>
+    </div>
+    <!-- Paiement -->
+    <div class="carte"><h3>Paiement et exploitation</h3>
+      <div class="ligne"><span>Dernière sortie</span><b id="derSortie">--</b></div>
+      <div class="ligne"><span>Entrées / sorties du jour</span><b><span id="entrees">0</span> / <span id="sorties">0</span></b></div>
+      <div class="ligne"><span>Durée moyenne</span><b><span id="dureeMoy">0</span> min</b></div>
+      <div class="ligne"><span>Plus long stationnement</span><b><span id="dureeMax">0</span> min</b></div>
+      <div class="ligne"><span>Codes invalides</span><b id="invalides">0</b></div>
+      <div class="ligne"><span>Flux (dernière heure)</span><b><span id="flux">0</span> véh./h</b></div>
+      <div class="ligne"><span>Tarif</span><b><span id="tarif">10</span> CDF / <span id="unite">60</span> s</b></div>
+    </div>
+    <!-- Sécurité -->
+    <div class="carte"><h3>Sécurité</h3>
+      <div class="ligne"><span>Incendie</span><span id="incendie" class="pastille">?</span></div>
+      <div class="ligne"><span>Détecteur de flamme</span><span id="flamme" class="pastille">?</span></div>
+      <div class="ligne"><span>Température</span><span id="temp" class="pastille">-- °C</span></div>
+      <div class="ligne"><span>Monoxyde de carbone</span><span id="co" class="pastille">-- ppm</span></div>
+      <div class="ligne"><span>Ventilation</span><span id="ventil" class="pastille">?</span></div>
+      <div class="ligne"><span>Alarme</span><span id="alarme" class="pastille">?</span></div>
+    </div>
+  </div>
+
+  <!-- Graphiques -->
+  <div class="grille g3">
+    <div class="carte"><h3>Taux d'occupation (%)</h3><canvas id="gTaux" height="180"></canvas></div>
+    <div class="carte"><h3>Recette cumulée (CDF)</h3><canvas id="gRecette" height="180"></canvas></div>
+    <div class="carte"><h3>CO (ppm)</h3><canvas id="gCO" height="180"></canvas></div>
+  </div>
+
+  <div class="grille g2">
+    <!-- Reçus en cours -->
+    <div class="carte"><h3>Reçus en cours (<span id="nbRecus">0</span>)</h3>
+      <div class="defile"><table>
+        <thead><tr><th>Code</th><th>Entrée</th><th>Durée</th><th>Montant</th></tr></thead>
+        <tbody id="recus"></tbody></table></div>
+    </div>
+    <!-- Commandes -->
+    <div class="carte"><h3>Commandes</h3>
+      <button onclick="cmd('barriere_entree=ouvrir')">Ouvrir entrée</button>
+      <button onclick="cmd('barriere_sortie=ouvrir')">Ouvrir sortie</button>
+      <button class="orange" onclick="cmd('mode=ferme')">Fermer le parking</button>
+      <button class="vert" onclick="cmd('mode=ouvert')">Ouvrir le parking</button>
+      <button class="rouge" onclick="cmd('acquitter')">Acquitter l'alarme</button>
+      <button class="rouge" onclick="cmd('test_alarme')">Tester l'alarme</button>
+      <button onclick="if(confirm('Remettre les statistiques du jour à zéro ?')) cmd('reset_jour')">Reset du jour</button>
+      <hr>
+      <div class="reglage"><span>Capacité</span><input id="inCap" type="number" value="120"><button onclick="regler('capacite','inCap')">OK</button></div>
+      <div class="reglage"><span>Tarif (CDF)</span><input id="inTarif" type="number" value="10"><button onclick="regler('tarif','inTarif')">OK</button></div>
+      <div class="reglage"><span>Unité de temps (s)</span><input id="inUnite" type="number" value="60"><button onclick="regler('unite_s','inUnite')">OK</button></div>
+      <div class="reglage"><span>Seuil CO (ppm)</span><input id="inCO" type="number" value="100"><button onclick="regler('seuil_co','inCO')">OK</button></div>
+    </div>
+  </div>
+
+  <!-- Journal -->
+  <div class="carte" style="margin-top:14px"><h3>Journal des événements (20 derniers)</h3>
+    <table><thead><tr><th>Heure</th><th>Type</th><th>Détails</th></tr></thead><tbody id="journal"></tbody></table>
+  </div>
+</main>
+
+<script>
+  // ---------- Paramètres EMQX Cloud ----------
+  const BROKER_URL = "wss://b1f780d1.ala.eu-central-1.emqxsl.com:8084/mqtt";
+  const USER = "parking-exploitant";
+  const PASS = "MotDePasseExploitant!";
+  const BASE = "unh/parking/p1/";
+
+  const $ = id => document.getElementById(id);
+  const recus = {};                 // code -> epoch d'entrée (s)
+  let tarif = 10, unite = 60, seuilCO = 100;
+
+  // ---------- Graphiques ----------
+  function graphe(id, datasets, opts = {}) {
+    return new Chart($(id), { type: "line", data: { labels: [], datasets },
+      options: { animation: false, plugins: { legend: { display: datasets.length > 1 } },
+                 scales: { x: { ticks: { maxTicksLimit: 6 } }, y: Object.assign({ beginAtZero: true }, opts) } } });
+  }
+  const gTaux = graphe("gTaux", [{ label: "Taux", data: [], borderColor: "#1f3a5f", fill: true, backgroundColor: "#1f3a5f22", tension: .3, pointRadius: 0 }], { max: 100 });
+  const gRecette = graphe("gRecette", [{ label: "Recette", data: [], borderColor: "#16a34a", stepped: true, pointRadius: 0 }]);
+  const gCO = graphe("gCO", [
+    { label: "CO", data: [], borderColor: "#7c3aed", tension: .3, pointRadius: 0 },
+    { label: "Renforcée (30)", data: [], borderColor: "#f59e0b", borderDash: [6, 4], pointRadius: 0 },
+    { label: "Évacuation (100)", data: [], borderColor: "#dc2626", borderDash: [6, 4], pointRadius: 0 }]);
+  function ajouterPoint(g, valeurs, max = 300) {
+    g.data.labels.push(new Date().toLocaleTimeString("fr-FR"));
+    valeurs.forEach((v, i) => g.data.datasets[i].data.push(v));
+    if (g.data.labels.length > max) { g.data.labels.shift(); g.data.datasets.forEach(d => d.data.shift()); }
+    g.update();
+  }
+
+  // ---------- Outils d'affichage ----------
+  function pastille(id, texte, classe) { const e = $(id); e.textContent = texte; e.className = "pastille " + (classe || ""); }
+  function etat(id, texte, classe) { const e = $(id); e.textContent = texte; e.className = "etat " + (classe || ""); }
+  const masquer = c => c.slice(0, 2) + "••••" + c.slice(6);
+  const hhmm = s => new Date(s * 1000).toLocaleTimeString("fr-FR");
+  function duree(s) { const m = Math.floor(s / 60); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min ${s % 60} s`; }
+
+  // ---------- Connexion MQTT ----------
+  const client = mqtt.connect(BROKER_URL, {
+    username: USER, password: PASS,
+    clientId: "dash-" + Math.random().toString(16).slice(2, 10), reconnectPeriod: 3000 });
+
+  client.on("connect", () => { etat("broker", "connecté", "ok"); client.subscribe(BASE + "#"); });
+  client.on("close", () => etat("broker", "déconnecté", "ko"));
+  client.on("error", e => { console.error(e); etat("broker", "erreur", "ko"); });
+
+  client.on("message", (topic, message) => {
+    const sujet = topic.substring(BASE.length);
+    const txt = message.toString();
+
+    if (sujet.startsWith("recus/")) {                       // reçus en cours (messages retenus)
+      const code = sujet.substring(6);
+      if (txt === "") delete recus[code];
+      else { try { recus[code] = JSON.parse(txt).entree; } catch (e) {} }
+      return;
+    }
+    if (sujet === "status") { etat("status", txt, txt === "online" ? "ok" : "ko"); return; }
+    if (sujet === "cmd") return;
+
+    let d; try { d = JSON.parse(txt); } catch (e) { return; }
+
+    if (sujet === "occupation") {
+      $("presents").textContent = d.presents; $("capacite").textContent = d.capacite;
+      $("libres").textContent = d.libres; $("taux").textContent = d.taux.toFixed(1) + " %";
+      const j = $("jauge"); j.style.width = Math.min(d.taux, 100) + "%";
+      j.style.background = d.taux > 95 ? "var(--rouge)" : d.taux >= 80 ? "var(--orange)" : "var(--vert)";
+      $("banComplet").classList.toggle("visible", d.complet);
+      ajouterPoint(gTaux, [d.taux]);
+    }
+    else if (sujet === "acces") {
+      $("vE").classList.toggle("la", d.vehicule_entree); $("vS").classList.toggle("la", d.vehicule_sortie);
+      $("dE").textContent = d.dist_entree + " cm"; $("dS").textContent = d.dist_sortie + " cm";
+      const cls = b => b === "ouverte" ? "ok" : b === "bloquee" ? "ko" : "";
+      pastille("bE", d.barriere_entree, cls(d.barriere_entree)); pastille("bS", d.barriere_sortie, cls(d.barriere_sortie));
+      etat("mode", d.mode, d.mode === "ouvert" ? "ok" : d.mode === "evacuation" ? "ko" : "warn");
+    }
+    else if (sujet === "securite") {
+      pastille("incendie", d.incendie ? "OUI" : "non", d.incendie ? "ko" : "ok");
+      pastille("flamme", d.flamme ? "flamme !" : "rien", d.flamme ? "ko" : "ok");
+      pastille("temp", d.temp.toFixed(1) + " °C", d.temp >= 57 ? "ko" : d.temp >= 45 ? "warn" : "ok");
+      pastille("co", d.co_ppm + " ppm", d.co_ppm > seuilCO ? "ko" : d.co_ppm >= 30 ? "warn" : "ok");
+      pastille("ventil", d.ventilation, d.ventilation === "normale" ? "ok" : d.ventilation === "renforcee" ? "warn" : "ko");
+      ajouterPoint(gCO, [d.co_ppm, 30, seuilCO]);
+    }
+    else if (sujet === "alarme") {
+      const actif = d.alarme !== "aucune";
+      pastille("alarme", d.alarme, actif ? "ko" : "ok");
+      document.body.classList.toggle("alarme", actif);
+      $("banAlarme").classList.toggle("visible", actif);
+      $("banAlarme").textContent = "🚨 ALARME : " + d.alarme.toUpperCase() + (actif ? " – en attente d'acquittement" : "");
+    }
+    else if (sujet === "stats") {
+      tarif = d.tarif; unite = d.unite_s;
+      $("tarif").textContent = d.tarif; $("unite").textContent = d.unite_s;
+      $("entrees").textContent = d.entrees_jour; $("sorties").textContent = d.sorties_jour;
+      $("recette").textContent = d.recette_jour.toLocaleString("fr-FR");
+      $("dureeMoy").textContent = d.duree_moy_min; $("dureeMax").textContent = d.duree_max_min;
+      $("invalides").textContent = d.codes_invalides_jour; $("flux").textContent = d.flux_heure;
+      ajouterPoint(gRecette, [d.recette_jour]);
+    }
+    else if (sujet === "evenement") {
+      journal(d);
+      if (d.type === "sortie") $("derSortie").textContent = `${duree(d.duree_s)} – ${d.montant} CDF`;
+    }
+  });
+
+  // ---------- Journal ----------
+  function journal(d) {
+    const details = Object.entries(d).filter(([k]) => k !== "type")
+      .map(([k, v]) => k === "recu" ? `reçu ${masquer(String(v))}` : `${k}: ${v}`).join(", ");
+    const couleur = { alarme: "#dc2626", assistance: "#dc2626", code_invalide: "#f59e0b", entree: "#16a34a", sortie: "#1f3a5f" }[d.type] || "#64748b";
+    const tb = $("journal");
+    tb.insertAdjacentHTML("afterbegin",
+      `<tr><td>${new Date().toLocaleTimeString("fr-FR")}</td><td><b style="color:${couleur}">${d.type}</b></td><td>${details}</td></tr>`);
+    while (tb.rows.length > 20) tb.deleteRow(-1);
+  }
+
+  // ---------- Reçus en cours : mis à jour chaque seconde ----------
+  setInterval(() => {
+    const now = Date.now() / 1000;
+    const lignes = Object.entries(recus).sort((a, b) => a[1] - b[1]).map(([code, entree]) => {
+      const s = Math.max(0, Math.floor(now - entree));
+      const montant = Math.max(1, Math.ceil(s / unite)) * tarif;
+      return `<tr><td>${masquer(code)}</td><td>${hhmm(entree)}</td><td>${duree(s)}</td><td>${montant} CDF</td></tr>`;
+    });
+    $("recus").innerHTML = lignes.join("") || `<tr><td colspan="4" class="lbl">Aucun véhicule</td></tr>`;
+    $("nbRecus").textContent = lignes.length;
+  }, 1000);
+
+  // ---------- Commandes ----------
+  function cmd(texte) { client.publish(BASE + "cmd", texte); journal({ type: "commande", envoyee: texte }); }
+  function regler(nom, champ) {
+    const v = $(champ).value; if (!v) return;
+    if (nom === "seuil_co") seuilCO = Number(v);
+    cmd(`${nom}=${v}`);
+  }
+</script>
+</body>
+</html>
